@@ -1,0 +1,91 @@
+name: Build RefAB
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --config Release --target RefAB_VST3 --parallel
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: cmake --build build --config Release --target RefAB_VST3 RefAB_AU --parallel
+
+      - name: Sign (ad-hoc) and package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ART=build/RefAB_artefacts/Release
+          codesign --force --deep --sign - "$ART/VST3/RefAB.vst3"
+          codesign --force --deep --sign - "$ART/AU/RefAB.component"
+          mkdir -p dist/RefAB-macOS
+          cp -R "$ART/VST3/RefAB.vst3" dist/RefAB-macOS/
+          cp -R "$ART/AU/RefAB.component" dist/RefAB-macOS/
+          cp README.md dist/RefAB-macOS/
+          cd dist && ditto -c -k --keepParent RefAB-macOS RefAB-macOS.zip
+
+      - name: Validate Audio Unit (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R build/RefAB_artefacts/Release/AU/RefAB.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          auval -v aufx Rfa1 Rfab
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/RefAB-Windows | Out-Null
+          Copy-Item -Recurse build/RefAB_artefacts/Release/VST3/RefAB.vst3 dist/RefAB-Windows/
+          Copy-Item README.md dist/RefAB-Windows/
+          Compress-Archive -Path dist/RefAB-Windows -DestinationPath dist/RefAB-Windows.zip
+
+      - name: Validate VST3 with pluginval
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip
+            7z x -y pluginval.zip > /dev/null
+            ./pluginval.exe --strictness-level 5 --skip-gui-tests --validate-in-process --validate build/RefAB_artefacts/Release/VST3/RefAB.vst3
+          else
+            curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip
+            unzip -q pluginval.zip
+            ./pluginval.app/Contents/MacOS/pluginval --strictness-level 5 --skip-gui-tests --validate-in-process --validate build/RefAB_artefacts/Release/VST3/RefAB.vst3
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RefAB-${{ matrix.name }}
+          path: dist/RefAB-${{ matrix.name }}.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/RefAB-${{ matrix.name }}.zip
