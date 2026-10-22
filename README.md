@@ -56,7 +56,16 @@ RefAB — аналог Metric AB: вешается на мастер, держи
 
 ## Сборка из исходников
 
-Нужны CMake 3.22+ и компилятор: Xcode на macOS, Visual Studio 2022 на Windows. JUCE скачается сам.
+**macOS, одной командой** (нужны только Xcode Command Line Tools; CMake скрипт скачает сам, если его нет):
+
+```
+cd путь/к/RefAB
+bash build_mac.sh
+```
+
+Скрипт соберёт VST3 и AU и сразу установит их в `~/Library/Audio/Plug-Ins`.
+
+**Вручную:** нужны CMake 3.22+ и компилятор: Xcode на macOS, Visual Studio 2022 на Windows. JUCE скачается сам.
 
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
