@@ -35,8 +35,11 @@ make_component_plist()
     pkgbuild --analyze --root "$root" "$plist" >/dev/null
     local i=0
     while /usr/libexec/PlistBuddy -c "Print :$i" "$plist" >/dev/null 2>&1; do
-        /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$plist"
-        /usr/libexec/PlistBuddy -c "Set :$i:BundleOverwriteAction upgrade" "$plist" 2>/dev/null || true
+        # the key may be missing depending on the macOS version: delete + add works either way
+        /usr/libexec/PlistBuddy -c "Delete :$i:BundleIsRelocatable" "$plist" >/dev/null 2>&1 || true
+        /usr/libexec/PlistBuddy -c "Add :$i:BundleIsRelocatable bool false" "$plist"
+        /usr/libexec/PlistBuddy -c "Delete :$i:BundleOverwriteAction" "$plist" >/dev/null 2>&1 || true
+        /usr/libexec/PlistBuddy -c "Add :$i:BundleOverwriteAction string upgrade" "$plist"
         i=$((i + 1))
     done
 }
