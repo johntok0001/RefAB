@@ -12,6 +12,16 @@ RefABEditor::RefABEditor (RefABProcessor& p)
     setLookAndFeel (&lnf);
 
     addAndMakeVisible (abButton);
+    abButton.aLabel = [this]
+    {
+        const int a = proc.getASlot();
+        return a < 0 ? juce::String ("DAW MIX") : proc.getSlotInfo (a).file.getFileNameWithoutExtension();
+    };
+    abButton.bLabel = [this]
+    {
+        const auto& info = proc.getSlotInfo (proc.getSelectedSlot());
+        return info.file == juce::File() ? juce::String ("REFERENCE") : info.file.getFileNameWithoutExtension();
+    };
     addAndMakeVisible (monitorChoice);
     addAndMakeVisible (bandChoice);
     addAndMakeVisible (slotList);
@@ -60,8 +70,9 @@ RefABEditor::RefABEditor (RefABProcessor& p)
 
     alignButton.onClick = [this]
     {
-        auto& ss = proc.getSlotSettings (proc.getSelectedSlot());
-        ss.anchor = proc.getLastHostTime();
+        // every track's cue point lines up with the current DAW position
+        for (int i = 0; i < RefABProcessor::numSlots; ++i)
+            proc.getSlotSettings (i).anchor = proc.getLastHostTime();
     };
     alignButton.setTooltip ("Sync mode: the cue point (white triangle) is aligned to the current DAW position.");
     addAndMakeVisible (alignButton);
@@ -188,7 +199,7 @@ void RefABEditor::resized()
 
 void RefABEditor::toggleLoop()
 {
-    const int slot = proc.getSelectedSlot();
+    const int slot = proc.getDisplaySlot();
     auto& ss = proc.getSlotSettings (slot);
     auto track = proc.getTrack (slot);
     if (track == nullptr) return;
@@ -209,11 +220,12 @@ void RefABEditor::toggleLoop()
 void RefABEditor::updateTransport()
 {
     const auto mode = (RefABProcessor::Mode) modeBox.getSelectedItemIndex();
-    const int slot = proc.getSelectedSlot();
+    const int slot = proc.getDisplaySlot();
     auto& ss = proc.getSlotSettings (slot);
     auto track = proc.getTrack (slot);
+    const bool anyTrack = track != nullptr || proc.getTrack (proc.getSelectedSlot()) != nullptr;
 
-    playButton.setEnabled (mode == RefABProcessor::Mode::free && track != nullptr);
+    playButton.setEnabled (mode == RefABProcessor::Mode::free && anyTrack);
     playButton.setButtonText (proc.isFreePlaying() ? "Stop" : "Play");
     playButton.setToggleState (proc.isFreePlaying() && mode == RefABProcessor::Mode::free, juce::dontSendNotification);
     alignButton.setEnabled (mode == RefABProcessor::Mode::sync && track != nullptr);
@@ -223,7 +235,7 @@ void RefABEditor::updateTransport()
     juce::String s;
     if (track != nullptr)
     {
-        s << fmtTime (proc.getRefPositionSeconds()) << " / " << fmtTime (track->getLengthSeconds());
+        s << fmtTime (proc.getPositionSeconds (slot)) << " / " << fmtTime (track->getLengthSeconds());
         if (ss.loopOn.load())
         {
             s << "    loop " << fmtTime (ss.loopStart.load()) << " - " << fmtTime (ss.loopEnd.load());
@@ -246,6 +258,7 @@ void RefABEditor::timerCallback()
 
     gonio.update();
     updateTransport();
+    abButton.repaint();
 
     if (proc.getSelectedSlot() != lastSelected)
     {

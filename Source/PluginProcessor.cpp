@@ -102,7 +102,6 @@ void RefABProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     lpFilter.setType (juce::dsp::LinkwitzRileyFilterType::lowpass);
     currentBand = Band::full;
 
-    lastSlot = -1;
     wasHostPlaying = false;
 
     if (std::abs (loadedRate.load() - sampleRate) > 0.5)
@@ -128,97 +127,51 @@ void RefABProcessor::configureBand (Band b)
     }
 }
 
-bool RefABProcessor::renderReference (float* outL, float* outR, int n, bool playing, double hostTime)
+RefABProcessor::Geometry RefABProcessor::geometryFor (const SlotSettings& ss, const RefTrack& t) noexcept
 {
-    juce::ScopedTryLock sl (trackLock);
-    if (! sl.isLocked())
-        return false;
+    Geometry g;
+    const double sr = t.sampleRate;
+    g.len = t.audio.getNumSamples();
+    g.ls = juce::jlimit (0.0, g.len, ss.loopStart.load() * sr);
+    g.le = juce::jlimit (0.0, g.len, ss.loopEnd.load() * sr);
+    g.loopOn = ss.loopOn.load() && (g.le - g.ls) > 0.05 * sr;
+    g.start = g.loopOn ? g.ls : juce::jlimit (0.0, g.len, ss.cue.load() * sr);
+    return g;
+}
 
-    const int slot = juce::jlimit (0, numSlots - 1, (int) pSlot->load());
-    const auto* track = tracks[(size_t) slot].get();
-    const auto mode = (Mode) juce::jlimit (0, 2, (int) pMode->load());
-    auto& ss = slotSettings[(size_t) slot];
+double RefABProcessor::slotPosition (int slot, const Geometry& g, double sr, bool sync, double hostTime) const noexcept
+{
+    const double offset = sync ? (hostTime - slotSettings[(size_t) slot].anchor.load()) * sr : elapsed;
+    double p = g.start + offset;
 
-    if (track == nullptr)
+    if (g.loopOn)
     {
-        lastSlot = slot;
-        return false;
-    }
-
-    const double sr = track->sampleRate;
-    const int len = track->audio.getNumSamples();
-    const double cue = ss.cue.load() * sr;
-    const double ls = juce::jlimit (0.0, (double) len, ss.loopStart.load() * sr);
-    const double le = juce::jlimit (0.0, (double) len, ss.loopEnd.load() * sr);
-    const bool loopOn = ss.loopOn.load() && (le - ls) > 0.05 * sr;
-    const double startPoint = loopOn ? ls : cue;
-
-    auto wrap = [&] (double p)
-    {
-        if (! loopOn) return p;
-        const double l = le - ls;
-        double r = std::fmod (p - ls, l);
+        const double l = g.le - g.ls;
+        double r = std::fmod (p - g.ls, l);
         if (r < 0) r += l;
-        return ls + r;
-    };
-
-    if (slot != lastSlot || (int) mode != lastMode)
-    {
-        refPos = startPoint;
-        lastSlot = slot;
-        lastMode = (int) mode;
+        p = g.ls + r;
     }
+    return p;
+}
 
-    const double seek = seekRequest.exchange (-1.0);
-    if (seek >= 0.0)
-        refPos = seek * sr;
-
-    bool active = false;
-    double pos = 0.0;
-
-    switch (mode)
-    {
-        case Mode::sync:
-            active = playing;
-            pos = cue + (hostTime - ss.anchor.load()) * sr;
-            if (! playing) refPos = wrap (pos);
-            break;
-
-        case Mode::restart:
-            if (playing && ! wasHostPlaying)
-                refPos = startPoint;
-            active = playing;
-            pos = refPos;
-            break;
-
-        case Mode::free:
-            active = freePlaying.load();
-            pos = refPos;
-            break;
-    }
-
-    wasHostPlaying = playing;
-
-    if (! active)
-    {
-        refDisplayPos.store (wrap (mode == Mode::sync ? pos : refPos) / sr);
-        return false;
-    }
-
-    pos = wrap (pos);
-    const float* srcL = track->audio.getReadPointer (0);
-    const float* srcR = track->audio.getReadPointer (1);
+bool RefABProcessor::renderSlot (const RefTrack& t, const Geometry& g, double pos, float* outL, float* outR, int n) noexcept
+{
+    const float* srcL = t.audio.getReadPointer (0);
+    const float* srcR = t.audio.getReadPointer (1);
+    const auto len = (juce::int64) g.len;
     auto ip = (juce::int64) std::floor (pos + 0.5); // nearest sample: host times are not exact in floating point
+    bool any = false;
 
     for (int i = 0; i < n; ++i)
     {
-        if (loopOn && ip >= (juce::int64) le)
-            ip = (juce::int64) ls;
+        if (g.loopOn && ip >= (juce::int64) g.le)
+            ip = (juce::int64) g.ls;
 
         if (ip >= 0 && ip < len)
         {
             outL[i] = srcL[ip];
             outR[i] = srcR[ip];
+            any = true;
         }
         else
         {
@@ -226,19 +179,7 @@ bool RefABProcessor::renderReference (float* outL, float* outR, int n, bool play
         }
         ++ip;
     }
-
-    if (mode != Mode::sync)
-    {
-        refPos = wrap (refPos + n);
-        if (! loopOn && refPos >= len && mode == Mode::free)
-        {
-            freePlaying.store (false);
-            refPos = cue;
-        }
-    }
-
-    refDisplayPos.store (juce::jlimit (0.0, (double) len, (double) ip) / sr);
-    return true;
+    return any;
 }
 
 void RefABProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -250,11 +191,12 @@ void RefABProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
     if (n == 0 || numCh == 0)
         return;
 
-    if (refBuffer.getNumSamples() < n)
-        refBuffer.setSize (2, n, false, false, true);
+    if (refBuffer.getNumSamples() < n) refBuffer.setSize (2, n, false, false, true);
+    if (aBuffer.getNumSamples() < n)   aBuffer.setSize (2, n, false, false, true);
 
     float* L = buffer.getWritePointer (0);
     float* R = numCh > 1 ? buffer.getWritePointer (1) : L;
+    const double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
 
     // Host transport
     bool playing = false;
@@ -265,7 +207,7 @@ void RefABProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
         {
             playing = pos->getIsPlaying();
             if (auto ts = pos->getTimeInSamples())
-                hostTime = (double) *ts / getSampleRate();
+                hostTime = (double) *ts / sr;
             else if (auto t = pos->getTimeInSeconds())
                 hostTime = *t;
         }
@@ -273,47 +215,153 @@ void RefABProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
     hostPlaying.store (playing);
     lastHostTime.store (hostTime);
 
-    // Measure the mix
+    // Playback clock
+    const auto mode = (Mode) juce::jlimit (0, 2, (int) pMode->load());
+    const bool sync = mode == Mode::sync;
+    if ((int) mode != lastMode)
+    {
+        elapsed = 0.0;
+        lastMode = (int) mode;
+    }
+
+    bool running = false;
+    switch (mode)
+    {
+        case Mode::sync:    running = playing; break;
+        case Mode::restart: if (playing && ! wasHostPlaying) elapsed = 0.0; running = playing; break;
+        case Mode::free:    running = freePlaying.load(); break;
+    }
+    wasHostPlaying = playing;
+
+    const int bSlot = getSelectedSlot();
+    const int aSel = aSlot.load();
+    const bool aIsFile = aSel >= 0;
+
+    float* rL = refBuffer.getWritePointer (0);
+    float* rR = refBuffer.getWritePointer (1);
+    float* aL = aBuffer.getWritePointer (0);
+    float* aR = aBuffer.getWritePointer (1);
+    bool bOn = false, aOn = false, anyLoop = false;
+    float bLufs = LoudnessMeter::silence, aLufs = LoudnessMeter::silence;
+
+    {
+        juce::ScopedTryLock sl (trackLock);
+        if (sl.isLocked())
+        {
+            const double seek = seekRequest.exchange (-1.0);
+            if (seek >= 0.0 && ! sync)
+            {
+                const int s = juce::jlimit (0, numSlots - 1, seekSlot.load());
+                if (auto* t = tracks[(size_t) s].get())
+                    elapsed = juce::jmax (0.0, seek * sr - geometryFor (slotSettings[(size_t) s], *t).start);
+            }
+
+            auto loudnessOf = [this] (int s, const RefTrack& t)
+            {
+                auto& ss = slotSettings[(size_t) s];
+                const float loopL = ss.loopLufs.load();
+                return (ss.loopOn.load() && loopL > -70.0f) ? loopL : t.lufs;
+            };
+
+            if (auto* t = tracks[(size_t) bSlot].get())
+            {
+                const auto g = geometryFor (slotSettings[(size_t) bSlot], *t);
+                anyLoop |= g.loopOn;
+                bLufs = loudnessOf (bSlot, *t);
+                if (running)
+                    bOn = renderSlot (*t, g, slotPosition (bSlot, g, sr, sync, hostTime), rL, rR, n);
+            }
+
+            if (aIsFile)
+                if (auto* t = tracks[(size_t) aSel].get())
+                {
+                    const auto g = geometryFor (slotSettings[(size_t) aSel], *t);
+                    anyLoop |= g.loopOn;
+                    aLufs = loudnessOf (aSel, *t);
+                    if (running)
+                        aOn = renderSlot (*t, g, slotPosition (aSel, g, sr, sync, hostTime), aL, aR, n);
+                }
+
+            if (running && ! sync)
+            {
+                elapsed += n;
+                // Free mode stops by itself once everything has played to the end
+                if (mode == Mode::free && ! anyLoop && ! bOn && ! aOn)
+                {
+                    freePlaying.store (false);
+                    elapsed = 0.0;
+                }
+            }
+
+            for (int s = 0; s < numSlots; ++s)
+                if (auto* t = tracks[(size_t) s].get())
+                {
+                    const auto g = geometryFor (slotSettings[(size_t) s], *t);
+                    posSeconds[(size_t) s].store (juce::jlimit (0.0, g.len, slotPosition (s, g, sr, sync, hostTime)) / sr);
+                }
+        }
+    }
+
+    if (! bOn)
+    {
+        juce::FloatVectorOperations::clear (rL, n);
+        juce::FloatVectorOperations::clear (rR, n);
+    }
+
+    // Side A: either the DAW input, or a loaded file replacing it
+    if (aIsFile)
+    {
+        if (! aOn)
+        {
+            juce::FloatVectorOperations::clear (aL, n);
+            juce::FloatVectorOperations::clear (aR, n);
+        }
+
+        if (R != L)
+        {
+            juce::FloatVectorOperations::copy (L, aL, n);
+            juce::FloatVectorOperations::copy (R, aR, n);
+        }
+        else
+        {
+            for (int i = 0; i < n; ++i) L[i] = 0.5f * (aL[i] + aR[i]);
+        }
+
+        for (int ch = 2; ch < numCh; ++ch)
+            buffer.clear (ch, 0, n);
+    }
+
+    refAudible.store (bOn);
+    aAudible.store (aOn);
+
+    // Measure A
     mixMeter.process (L, R, n);
     mixScope.push (L, R, n);
 
-    // Render the reference
-    float* rL = refBuffer.getWritePointer (0);
-    float* rR = refBuffer.getWritePointer (1);
-    const bool refOn = renderReference (rL, rR, n, playing, hostTime);
-    refAudible.store (refOn);
-
-    if (! refOn)
-        juce::FloatVectorOperations::clear (rL, n), juce::FloatVectorOperations::clear (rR, n);
-    else
+    if (bOn)
         refMeter.process (rL, rR, n);
 
-    // Loudness match
+    // Loudness match (gain applied to B)
     const auto match = (Match) juce::jlimit (0, 2, (int) pMatch->load());
     float gainDb = 0.0f;
     bool measuring = false;
 
     if (match == Match::integrated)
     {
-        float refL = LoudnessMeter::silence;
+        float mixL;
+        if (aIsFile)
         {
-            const int slot = juce::jlimit (0, numSlots - 1, (int) pSlot->load());
-            juce::ScopedTryLock sl (trackLock);
-            if (sl.isLocked())
-                if (auto* t = tracks[(size_t) slot].get())
-                {
-                    auto& ss = slotSettings[(size_t) slot];
-                    const float loopL = ss.loopLufs.load();
-                    refL = (ss.loopOn.load() && loopL > -70.0f) ? loopL : t->lufs;
-                }
+            mixL = aLufs; // known exactly from the file
+        }
+        else
+        {
+            mixL = mixMeter.getIntegrated();
+            if (mixL <= -70.0f)
+                mixL = mixMeter.getShortTerm();
         }
 
-        float mixL = mixMeter.getIntegrated();
-        if (mixL <= -70.0f)
-            mixL = mixMeter.getShortTerm();
-
-        if (mixL > -70.0f && refL > -70.0f)
-            gainDb = mixL - refL;
+        if (mixL > -70.0f && bLufs > -70.0f)
+            gainDb = mixL - bLufs;
         else
             measuring = true;
     }
@@ -321,12 +369,12 @@ void RefABProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
     {
         const float mixS = mixMeter.getShortTerm();
         const float refS = refMeter.getShortTerm();
-        if (refOn && mixS > -60.0f && refS > -60.0f)
+        if (bOn && mixS > -60.0f && refS > -60.0f)
         {
-            const float coeff = 1.0f - std::exp (-(float) n / (float) (getSampleRate() * 1.5));
+            const float coeff = 1.0f - std::exp (-(float) n / (float) (sr * 1.5));
             liveMatchDb += (mixS - refS - liveMatchDb) * coeff;
         }
-        else if (! refOn || mixS <= -60.0f)
+        else if (! bOn || mixS <= -60.0f)
         {
             measuring = true;
         }
@@ -392,6 +440,29 @@ void RefABProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
             }
         }
     }
+}
+
+void RefABProcessor::setASlot (int slot)
+{
+    jassert (juce::MessageManager::existsAndIsCurrentThread());
+    slot = (slot >= 0 && slot < numSlots) ? slot : -1;
+    if (aSlot.exchange (slot) == slot)
+        return;
+
+    if (slot >= 0)
+    {
+        // Two files need no DAW transport: switch to Free so the Play button works
+        if (auto* p = apvts.getParameter ("mode"))
+            p->setValueNotifyingHost (p->convertTo0to1 ((float) Mode::free));
+
+        // Don't let A and B be the same track
+        if (getSelectedSlot() == slot)
+            for (int i = 0; i < numSlots; ++i)
+                if (i != slot && slotInfo[(size_t) i].status == SlotInfo::Status::ready) { setSelectedSlot (i); break; }
+    }
+
+    resetMeters();
+    slotsChanged.sendChangeMessage();
 }
 
 //==============================================================================
@@ -489,6 +560,8 @@ void RefABProcessor::clearSlot (int slot)
     }
 
     slotInfo[(size_t) slot] = {};
+    if (aSlot.load() == slot)
+        aSlot.store (-1);
     auto& ss = slotSettings[(size_t) slot];
     ss.cue = 0.0; ss.loopStart = 0.0; ss.loopEnd = 0.0; ss.anchor = 0.0;
     ss.loopOn = false; ss.loopLufs = LoudnessMeter::silence;
@@ -562,6 +635,7 @@ void RefABProcessor::getStateInformation (juce::MemoryBlock& destData)
         slots.appendChild (s, nullptr);
     }
     root.appendChild (slots, nullptr);
+    root.setProperty ("aSlot", aSlot.load(), nullptr);
 
     if (auto xml = root.createXml())
         copyXmlToBinary (*xml, destData);
@@ -582,8 +656,9 @@ void RefABProcessor::setStateInformation (const void* data, int sizeInBytes)
         apvts.replaceState (params);
 
     auto slots = root.getChildWithName ("Slots");
+    const int savedA = root.getProperty ("aSlot", -1);
 
-    onMessageThread (alive, [this, slots]
+    onMessageThread (alive, [this, slots, savedA]
     {
         for (int i = 0; i < numSlots; ++i)
             if (slotInfo[(size_t) i].file != juce::File())
@@ -605,6 +680,9 @@ void RefABProcessor::setStateInformation (const void* data, int sizeInBytes)
             ss.loopEnd = (double) s.getProperty ("loopEnd", 0.0);
             ss.anchor = (double) s.getProperty ("anchor", 0.0);
         }
+
+        aSlot.store ((savedA >= 0 && savedA < numSlots && slotInfo[(size_t) savedA].file != juce::File()) ? savedA : -1);
+        slotsChanged.sendChangeMessage();
     });
 }
 

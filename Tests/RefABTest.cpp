@@ -232,7 +232,6 @@ int main (int argc, char** argv)
                 for (int i = 20000; i < 60000; ++i) c += (double) out.getSample (0, i) * noise.getSample (0, i + lag);
                 if (c > best) { best = c; bestLag = lag; }
             }
-            std::cout << "    debug: out/sig energy " << oe / sigE << " best lag " << bestLag << " gain " << p.getMatchGainDb() << std::endl;
         }
         check (nullDb < -90.0, "B nulls against A in Sync: " + juce::String (nullDb, 1) + " dB");
 
@@ -255,7 +254,7 @@ int main (int argc, char** argv)
         ph.playing = true; ph.time = 100.0;
         juce::AudioBuffer<float> blk (2, (int) (1.5 * sr)); blk.clear();
         run (p, ph, blk, out, 480);
-        check (std::abs (p.getRefPositionSeconds() - 2.5) < 0.02, "loop wraps: position " + juce::String (p.getRefPositionSeconds(), 3) + " s (expect 2.5)");
+        check (std::abs (p.getPositionSeconds (1) - 2.5) < 0.02, "loop wraps: position " + juce::String (p.getPositionSeconds (1), 3) + " s (expect 2.5)");
         ss.loopOn = false;
     }
 
@@ -272,9 +271,78 @@ int main (int argc, char** argv)
         run (p, ph, mono, out); // settle
     }
 
+    std::cout << "File vs file (A = file)" << std::endl;
+    {
+        // A = noise, B = the same noise 6 dB louder. With loudness match B must null against A,
+        // and switching A/B mid-playback must keep both in sync.
+        auto noiseA = makeNoise (sr, 10.0, 0.2f, 11);
+        juce::AudioBuffer<float> noiseB (noiseA);
+        noiseB.applyGain (2.0f);
+        auto fa = dir.getChildFile ("versionA.wav"), fb = dir.getChildFile ("versionB.wav");
+        writeWav (fa, noiseA, sr);
+        writeWav (fb, noiseB, sr);
+        p.loadSlot (2, fa);
+        p.loadSlot (3, fb);
+        check (waitReady (p, 2) && waitReady (p, 3), "two versions load");
+
+        setParam (p, "slot", 3);
+        setParam (p, "match", 1);
+        setParam (p, "trim", 0);
+        setParam (p, "ab", 0);
+        p.setASlot (2);
+        check ((int) p.apvts.getRawParameterValue ("mode")->load() == 2, "assigning a file to A switches to Free mode");
+        p.setFreePlaying (true);
+        ph.playing = false;
+
+        // DAW input is loud garbage: it must be ignored
+        juce::AudioBuffer<float> daw = makeSine (sr, 2.0, 0.9f, 300.0);
+        juce::AudioBuffer<float> outA, outB;
+        run (p, ph, daw, outA);              // 0..2 s as A
+        setParam (p, "ab", 1);
+        run (p, ph, daw, outB);              // 2..4 s as B
+
+        double e = 0, sig = 0;
+        for (int i = 0; i < outA.getNumSamples(); ++i)
+        {
+            e += std::pow (outA.getSample (0, i) - noiseA.getSample (0, i), 2.0);
+            sig += std::pow (noiseA.getSample (0, i), 2.0);
+        }
+        check (10.0 * std::log10 (e / sig + 1e-30) < -90.0, "A plays the A file, DAW input ignored");
+
+        check (std::abs (p.getMatchGainDb() + 6.02f) < 0.1f, "B gain " + juce::String (p.getMatchGainDb(), 2) + " dB (expect -6.02)");
+
+        const int off = (int) (2.0 * sr);
+        e = 0; sig = 0;
+        for (int i = (int) (0.1 * sr); i < outB.getNumSamples(); ++i)
+        {
+            e += std::pow (outB.getSample (0, i) - noiseA.getSample (0, off + i), 2.0);
+            sig += std::pow (noiseA.getSample (0, off + i), 2.0);
+        }
+        const double nullDb = 10.0 * std::log10 (e / sig + 1e-30);
+        check (nullDb < -60.0, "B stays in sync after the switch and matches A: null " + juce::String (nullDb, 1) + " dB");
+
+        // jump: click at 7.0 s moves both
+        p.seekTo (3, 7.0);
+        run (p, ph, daw, outB);
+        check (std::abs (p.getPositionSeconds (2) - 9.0) < 0.05 && std::abs (p.getPositionSeconds (3) - 9.0) < 0.05,
+               "seek moves A and B together: " + juce::String (p.getPositionSeconds (2), 2) + " / " + juce::String (p.getPositionSeconds (3), 2));
+
+        // plays to the end and stops by itself
+        run (p, ph, daw, outB);
+        check (! p.isFreePlaying(), "Free playback stops at the end");
+
+        p.setASlot (-1);
+        setParam (p, "ab", 0);
+        check (p.getASlot() == -1, "A back to DAW");
+        p.clearSlot (2);
+        p.clearSlot (3);
+    }
+
     std::cout << "State" << std::endl;
     {
         p.getSlotSettings (0).cue = 12.5;
+        setParam (p, "slot", 1);
+        p.setASlot (0);
         juce::MemoryBlock mb;
         p.getStateInformation (mb);
 
@@ -285,6 +353,8 @@ int main (int argc, char** argv)
         check (waitReady (q, 0) && waitReady (q, 1), "both slots reload from saved state");
         check (std::abs (q.getSlotSettings (0).cue.load() - 12.5) < 1e-9, "cue point restored");
         check (q.getSelectedSlot() == 1, "selected slot restored");
+        check (q.getASlot() == 0, "A file assignment restored");
+        p.setASlot (-1);
     }
 
     std::cout << "Editor" << std::endl;
@@ -292,7 +362,8 @@ int main (int argc, char** argv)
         setParam (p, "slot", 0);
         setParam (p, "ab", 1);
         setParam (p, "match", 1);
-        setParam (p, "mode", 0);
+        p.setASlot (1);
+        p.setFreePlaying (true);
         auto& ss = p.getSlotSettings (0);
         ss.loopStart = 8.0; ss.loopEnd = 16.0; ss.loopOn = true;
         p.updateLoopLoudness (0);

@@ -76,13 +76,27 @@ public:
     // Transport helpers (message thread)
     void setFreePlaying (bool shouldPlay) { freePlaying.store (shouldPlay); }
     bool isFreePlaying() const { return freePlaying.load(); }
-    void seekReference (double seconds) { seekRequest.store (seconds); }
+    // Moves all tracks together so that `slot` plays from `seconds` (Free / Restart modes).
+    void seekTo (int slot, double seconds) { seekSlot.store (slot); seekRequest.store (seconds); }
     double getLastHostTime() const { return lastHostTime.load(); }
     bool isHostPlaying() const { return hostPlaying.load(); }
 
     // State for the UI (any thread)
-    double getRefPositionSeconds() const { return refDisplayPos.load(); }
+    double getPositionSeconds (int slot) const { return posSeconds[(size_t) juce::jlimit (0, numSlots - 1, slot)].load(); }
     bool isReferenceAudible() const { return refAudible.load(); }
+    bool isAFileAudible() const { return aAudible.load(); }
+
+    // Side A source: -1 = the DAW input (your mix), otherwise a slot index (message thread)
+    int getASlot() const { return aSlot.load(); }
+    void setASlot (int slot);
+
+    // The slot whose waveform the UI should show: the one being heard
+    int getDisplaySlot() const
+    {
+        const int a = aSlot.load();
+        return (a >= 0 && *pAB < 0.5f) ? a : getSelectedSlot();
+    }
+    bool isListeningToB() const { return *pAB > 0.5f; }
     float getMatchGainDb() const { return matchGainDb.load(); }
     bool isMatchMeasuring() const { return matchMeasuring.load(); }
     void resetMeters() { mixMeter.resetIntegrated(); refMeter.resetIntegrated(); }
@@ -94,7 +108,10 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
-    bool renderReference (float* outL, float* outR, int n, bool playing, double hostTime);
+    struct Geometry { double len, ls, le, start; bool loopOn; };
+    static Geometry geometryFor (const SlotSettings&, const RefTrack&) noexcept;
+    double slotPosition (int slot, const Geometry&, double sampleRate, bool sync, double hostTime) const noexcept;
+    static bool renderSlot (const RefTrack&, const Geometry&, double pos, float* outL, float* outR, int n) noexcept;
     void configureBand (Band b);
     void reloadAllForSampleRate();
 
@@ -119,20 +136,22 @@ private:
     std::atomic<double> loadedRate { 0.0 };
 
     // Playback (audio thread)
-    double refPos = 0.0;
-    int lastSlot = -1;
+    double elapsed = 0.0; // shared playback clock in samples (Restart / Free modes)
     int lastMode = -1;
     bool wasHostPlaying = false;
     std::atomic<bool> freePlaying { false };
     std::atomic<double> seekRequest { -1.0 };
+    std::atomic<int> seekSlot { 0 };
+    std::atomic<int> aSlot { -1 };
+    std::atomic<bool> aAudible { false };
+    std::array<std::atomic<double>, numSlots> posSeconds {};
     std::atomic<double> lastHostTime { 0.0 };
     std::atomic<bool> hostPlaying { false };
-    std::atomic<double> refDisplayPos { 0.0 };
     std::atomic<bool> refAudible { false };
     std::atomic<float> matchGainDb { 0.0f };
     std::atomic<bool> matchMeasuring { false };
 
-    juce::AudioBuffer<float> refBuffer;
+    juce::AudioBuffer<float> refBuffer, aBuffer;
     juce::SmoothedValue<float> abSmoothed, refGain;
     float liveMatchDb = 0.0f;
 

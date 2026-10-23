@@ -180,8 +180,11 @@ namespace ui
         {
             attachment.sendInitialUpdate();
             setMouseCursor (juce::MouseCursor::PointingHandCursor);
-            setTooltip ("Switch between your mix (A) and the reference (B). Map the 'A/B' parameter to a MIDI key for hands-free switching.");
+            setTooltip ("Switch between A and B. A is your DAW mix, or a file marked 'A' in the list. "
+                        "Map the 'A/B' parameter to a key or MIDI note in your DAW for hands-free switching.");
         }
+
+        std::function<juce::String()> aLabel, bLabel;
 
         void paint (juce::Graphics& g) override
         {
@@ -205,8 +208,8 @@ namespace ui
                 g.setFont (font (11.0f, on));
                 g.drawText (small, area.withTrimmedTop (area.getHeight() * 0.66f), juce::Justification::centredTop);
             };
-            drawHalf (left, "A", "MIX", ! isB);
-            drawHalf (right, "B", "REFERENCE", isB);
+            drawHalf (left.reduced (6.0f, 0.0f), "A", aLabel ? aLabel() : "MIX", ! isB);
+            drawHalf (right.reduced (6.0f, 0.0f), "B", bLabel ? bLabel() : "REFERENCE", isB);
 
             g.setColour (col::line);
             g.drawRoundedRectangle (r, 8.0f, 1.0f);
@@ -269,24 +272,50 @@ namespace ui
 
             g.setColour (col::dim);
             g.setFont (font (11.5f, true));
-            g.drawText ("REFERENCES", getLocalBounds().reduced (14, 0).withHeight (34), juce::Justification::centredLeft);
+            g.drawText ("TRACKS", getLocalBounds().reduced (14, 0).withHeight (34), juce::Justification::centredLeft);
             g.setFont (font (11.0f));
-            g.drawText ("LUFS", getLocalBounds().reduced (14, 0).withHeight (34), juce::Justification::centredRight);
+            g.drawText ("LUFS        A    B", getLocalBounds().reduced (14, 0).withHeight (34), juce::Justification::centredRight);
 
             const int sel = proc.getSelectedSlot();
+            const int aSel = proc.getASlot();
+
+            // "A = DAW" row
+            {
+                auto r = dawRowBounds().toFloat();
+                const bool on = aSel < 0;
+                g.setColour (on ? col::mix.withAlpha (0.14f) : (hover == dawRow ? col::panel2 : col::panel));
+                g.fillRoundedRectangle (r, 6.0f);
+                if (on)
+                {
+                    g.setColour (col::mix);
+                    g.fillRoundedRectangle (r.withWidth (3.0f).reduced (0, 6), 1.5f);
+                }
+                auto inner = r.reduced (12.0f, 0.0f);
+                drawChip (g, aChipBounds (inner), "A", on, col::mix);
+                inner.removeFromRight (2 * chipW + 8);
+                g.setFont (font (13.0f, on));
+                g.setColour (on ? col::text : col::dim);
+                g.drawText ("DAW mix (plugin input)", inner.withTrimmedLeft (20.0f), juce::Justification::centredLeft, true);
+                g.setFont (mono (12.0f));
+                g.setColour (on ? col::mix : col::faint);
+                g.drawText ("~", inner.removeFromLeft (16.0f), juce::Justification::centredLeft);
+            }
 
             for (int i = 0; i < RefABProcessor::numSlots; ++i)
             {
                 auto r = rowBounds (i).toFloat();
                 const auto& info = proc.getSlotInfo (i);
                 auto track = proc.getTrack (i);
-                const bool isSel = i == sel;
+                const bool isB = i == sel;
+                const bool isA = i == aSel;
+                const bool ready = info.status == RefABProcessor::SlotInfo::Status::ready && track != nullptr;
 
-                if (isSel)
+                if (isA || isB)
                 {
-                    g.setColour (col::ref.withAlpha (0.14f));
+                    const auto c = isA ? col::mix : col::ref;
+                    g.setColour (c.withAlpha (0.14f));
                     g.fillRoundedRectangle (r, 6.0f);
-                    g.setColour (col::ref.withAlpha (0.9f));
+                    g.setColour (c.withAlpha (0.9f));
                     g.fillRoundedRectangle (r.withWidth (3.0f).reduced (0, 6), 1.5f);
                 }
                 else if (i == hover)
@@ -302,8 +331,16 @@ namespace ui
                 }
 
                 auto inner = r.reduced (12.0f, 0.0f);
+
+                if (ready)
+                {
+                    drawChip (g, aChipBounds (inner), "A", isA, col::mix);
+                    drawChip (g, bChipBounds (inner), "B", isB && ! isA, col::ref);
+                }
+                inner.removeFromRight (2 * chipW + 8);
+
                 g.setFont (mono (12.0f));
-                g.setColour (isSel ? col::ref : col::faint);
+                g.setColour (isA ? col::mix : isB ? col::ref : col::faint);
                 g.drawText (juce::String (i + 1), inner.removeFromLeft (16.0f), juce::Justification::centredLeft);
 
                 juce::String name, right;
@@ -317,12 +354,12 @@ namespace ui
                         break;
                     case RefABProcessor::SlotInfo::Status::loading:
                         name = info.file.getFileNameWithoutExtension();
-                        right = "loading";
+                        right = "...";
                         nameCol = col::dim;
                         break;
                     case RefABProcessor::SlotInfo::Status::error:
                         name = info.file.getFileNameWithoutExtension();
-                        right = info.error;
+                        right = "error";
                         nameCol = col::bad;
                         break;
                     case RefABProcessor::SlotInfo::Status::ready:
@@ -331,40 +368,51 @@ namespace ui
                         break;
                 }
 
-                if (track != nullptr && info.status == RefABProcessor::SlotInfo::Status::loading)
-                    right = fmtDb (track->lufs);
-
                 g.setFont (mono (12.0f));
                 g.setColour (info.status == RefABProcessor::SlotInfo::Status::error ? col::bad : col::dim);
-                const float rw = info.status == RefABProcessor::SlotInfo::Status::error ? 90.0f : 46.0f;
-                g.drawText (right, inner.removeFromRight (rw), juce::Justification::centredRight);
+                g.drawText (right, inner.removeFromRight (42.0f), juce::Justification::centredRight);
 
-                g.setFont (font (13.0f, isSel));
+                g.setFont (font (13.0f, isA || isB));
                 g.setColour (nameCol);
                 g.drawText (name, inner.reduced (4.0f, 0.0f), juce::Justification::centredLeft, true);
             }
 
             auto hint = getLocalBounds().reduced (14, 10);
-            hint = hint.removeFromBottom (54);
+            hint = hint.removeFromBottom (70);
             g.setColour (col::faint);
             g.setFont (font (11.5f));
-            g.drawFittedText ("Drag audio files here (WAV, AIFF, FLAC, MP3). Right-click a slot to replace or remove it.",
-                              hint, juce::Justification::bottomLeft, 3);
+            g.drawFittedText ("Drag audio files here. Click a track to hear it as B. "
+                              "Click 'A' to use a file as A instead of the DAW, e.g. to compare two files. "
+                              "Right-click for more.",
+                              hint, juce::Justification::bottomLeft, 4);
         }
 
-        void mouseMove (const juce::MouseEvent& e) override { setHover (slotAt (e.getPosition())); }
+        void mouseMove (const juce::MouseEvent& e) override { setHover (hitRow (e.getPosition())); }
         void mouseExit (const juce::MouseEvent&) override { setHover (-1); }
 
         void mouseDown (const juce::MouseEvent& e) override
         {
-            const int s = slotAt (e.getPosition());
+            const auto pt = e.getPosition();
+
+            if (dawRowBounds().contains (pt))
+            {
+                proc.setASlot (-1);
+                return;
+            }
+
+            const int s = slotAt (pt);
             if (s < 0) return;
 
-            const bool empty = proc.getSlotInfo (s).status == RefABProcessor::SlotInfo::Status::empty;
+            const auto& info = proc.getSlotInfo (s);
+            const bool empty = info.status == RefABProcessor::SlotInfo::Status::empty;
+            const bool ready = info.status == RefABProcessor::SlotInfo::Status::ready;
 
             if (e.mods.isPopupMenu())
             {
                 juce::PopupMenu m;
+                m.addItem (4, "Listen as B", ready);
+                m.addItem (5, proc.getASlot() == s ? "Use DAW mix as A again" : "Use as A (instead of DAW)", ready);
+                m.addSeparator();
                 m.addItem (1, empty ? "Load file..." : "Replace file...");
                 m.addItem (2, "Remove", ! empty);
                 if (! empty)
@@ -375,20 +423,74 @@ namespace ui
                                      if (r == 1) openChooser (s);
                                      if (r == 2) proc.clearSlot (s);
                                      if (r == 3) proc.getSlotInfo (s).file.revealToUser();
+                                     if (r == 4) selectB (s);
+                                     if (r == 5) proc.setASlot (proc.getASlot() == s ? -1 : s);
                                  });
                 return;
             }
 
             if (empty)
+            {
                 openChooser (s);
+                return;
+            }
+
+            if (! ready)
+                return;
+
+            auto inner = rowBounds (s).toFloat().reduced (12.0f, 0.0f);
+            if (aChipBounds (inner).expanded (2.0f).contains (pt.toFloat()))
+                proc.setASlot (proc.getASlot() == s ? -1 : s);
             else
-                proc.setSelectedSlot (s);
+                selectB (s);
         }
 
+        std::function<void (bool isB)> onSideChosen;
+
     private:
+        static constexpr float chipW = 22.0f;
+        static constexpr int dawRow = 100;
+
+        void selectB (int s)
+        {
+            if (proc.getASlot() == s)
+                proc.setASlot (-1);
+            proc.setSelectedSlot (s);
+            if (onSideChosen) onSideChosen (true);
+        }
+
+        static juce::Rectangle<float> aChipBounds (juce::Rectangle<float> inner)
+        {
+            return inner.withLeft (inner.getRight() - 2 * chipW - 4).withWidth (chipW).withSizeKeepingCentre (chipW, 20.0f);
+        }
+
+        static juce::Rectangle<float> bChipBounds (juce::Rectangle<float> inner)
+        {
+            return inner.withLeft (inner.getRight() - chipW).withSizeKeepingCentre (chipW, 20.0f);
+        }
+
+        static void drawChip (juce::Graphics& g, juce::Rectangle<float> r, const juce::String& t, bool on, juce::Colour c)
+        {
+            g.setColour (on ? c : col::panel2);
+            g.fillRoundedRectangle (r, 4.0f);
+            g.setColour (on ? c : col::line.brighter (0.15f));
+            g.drawRoundedRectangle (r.reduced (0.5f), 4.0f, 1.0f);
+            g.setColour (on ? juce::Colours::black : col::dim);
+            g.setFont (font (11.5f, true));
+            g.drawText (t, r, juce::Justification::centred);
+        }
+
+        juce::Rectangle<int> dawRowBounds() const { return { 6, 36, getWidth() - 12, 32 }; }
+
         juce::Rectangle<int> rowBounds (int i) const
         {
-            return { 6, 36 + i * 34, getWidth() - 12, 32 };
+            return { 6, 36 + 40 + i * 34, getWidth() - 12, 32 };
+        }
+
+        int hitRow (juce::Point<int> pt) const
+        {
+            if (dawRowBounds().contains (pt)) return dawRow;
+            return slotAt (pt);
         }
 
         void setHover (int h) { if (h != hover) { hover = h; repaint(); } }
@@ -503,14 +605,14 @@ namespace ui
             if (diffMode)
             {
                 g.setColour (col::text);
-                g.drawText ("REFERENCE minus MIX  (above 0 = reference has more)", leg, juce::Justification::centredRight);
+                g.drawText ("B minus A  (above 0 = B has more)", leg, juce::Justification::centredRight);
             }
             else
             {
                 g.setColour (col::ref);
-                g.drawText ("REF", leg.removeFromRight (34.0f), juce::Justification::centredRight);
+                g.drawText ("B", leg.removeFromRight (20.0f), juce::Justification::centredRight);
                 g.setColour (col::mix);
-                g.drawText ("MIX", leg.removeFromRight (40.0f), juce::Justification::centredRight);
+                g.drawText ("A", leg.removeFromRight (26.0f), juce::Justification::centredRight);
             }
 
             // hover readout
@@ -525,7 +627,7 @@ namespace ui
                 if (diffMode)
                     txt << "    diff " << (diffDb[(size_t) i] >= 0 ? "+" : "") << juce::String (diffDb[(size_t) i], 1) << " dB";
                 else
-                    txt << "    mix " << juce::String (mixDb[(size_t) i], 1) << "    ref " << juce::String (refDb[(size_t) i], 1);
+                    txt << "    A " << juce::String (mixDb[(size_t) i], 1) << "    B " << juce::String (refDb[(size_t) i], 1);
 
                 auto box = juce::Rectangle<float> (plot.getX() + 8, plot.getY() + 6, 300, 18);
                 g.setColour (col::text);
@@ -655,8 +757,10 @@ namespace ui
 
         void update()
         {
-            auto t = proc.getTrack (proc.getSelectedSlot());
-            if (t != track) { track = t; }
+            if (dragMode == DragMode::none)
+                slot = proc.getDisplaySlot();
+            track = proc.getTrack (slot);
+            isA = proc.getASlot() == slot && ! proc.isListeningToB();
             repaint();
         }
 
@@ -676,7 +780,7 @@ namespace ui
                 return;
             }
 
-            const auto& ss = proc.getSlotSettings (proc.getSelectedSlot());
+            const auto& ss = proc.getSlotSettings (slot);
             const double len = track->getLengthSeconds();
             const float midY = area.getCentreY();
             const float halfH = area.getHeight() * 0.5f;
@@ -687,9 +791,9 @@ namespace ui
             if (le > ls)
             {
                 auto lr = juce::Rectangle<float>::leftTopRightBottom (xFor (ls, len), area.getY(), xFor (le, len), area.getBottom());
-                g.setColour (col::ref.withAlpha (loopOn ? 0.13f : 0.05f));
+                g.setColour (accent().withAlpha (loopOn ? 0.13f : 0.05f));
                 g.fillRect (lr);
-                g.setColour (col::ref.withAlpha (loopOn ? 0.8f : 0.3f));
+                g.setColour (accent().withAlpha (loopOn ? 0.8f : 0.3f));
                 g.fillRect (lr.withWidth (2.0f));
                 g.fillRect (lr.withLeft (lr.getRight() - 2.0f));
             }
@@ -707,9 +811,9 @@ namespace ui
                     rm = juce::jmax (rm, track->wavRms[(size_t) b]);
                 }
                 const float px = area.getX() + x;
-                g.setColour (col::ref.withAlpha (0.35f));
+                g.setColour (accent().withAlpha (0.35f));
                 g.drawVerticalLine ((int) px, midY - pk * halfH, midY + pk * halfH);
-                g.setColour (col::ref.withAlpha (0.8f));
+                g.setColour (accent().withAlpha (0.8f));
                 g.drawVerticalLine ((int) px, midY - rm * halfH, midY + rm * halfH);
             }
 
@@ -723,9 +827,19 @@ namespace ui
             g.drawVerticalLine ((int) cx, area.getY(), area.getBottom());
 
             // playhead
-            const float px = xFor (proc.getRefPositionSeconds(), len);
-            g.setColour (proc.isReferenceAudible() ? col::text : col::dim);
+            const float px = xFor (proc.getPositionSeconds (slot), len);
+            const bool audible = isA ? proc.isAFileAudible() : proc.isReferenceAudible();
+            g.setColour (audible ? col::text : col::dim);
             g.fillRect (juce::Rectangle<float> (px - 1.0f, area.getY() - 2.0f, 2.0f, area.getHeight() + 4.0f));
+
+            // which side this is
+            {
+                auto tag = juce::Rectangle<float> (area.getX() + 6, area.getY() + 4, 300, 16);
+                g.setFont (font (11.5f, true));
+                g.setColour (accent());
+                g.drawText ((isA ? "A  " : "B  ") + proc.getSlotInfo (slot).file.getFileNameWithoutExtension(),
+                            tag, juce::Justification::centredLeft, true);
+            }
 
             // time ruler
             g.setFont (font (10.5f));
@@ -739,7 +853,7 @@ namespace ui
         void mouseDown (const juce::MouseEvent& e) override
         {
             if (track == nullptr) return;
-            const auto& ss = proc.getSlotSettings (proc.getSelectedSlot());
+            const auto& ss = proc.getSlotSettings (slot);
             const double len = track->getLengthSeconds();
             dragMode = DragMode::none;
             dragStartSec = secFor ((float) e.x, len);
@@ -754,7 +868,7 @@ namespace ui
         void mouseDrag (const juce::MouseEvent& e) override
         {
             if (track == nullptr) return;
-            auto& ss = proc.getSlotSettings (proc.getSelectedSlot());
+            auto& ss = proc.getSlotSettings (slot);
             const double len = track->getLengthSeconds();
             const double t = secFor ((float) e.x, len);
 
@@ -783,14 +897,18 @@ namespace ui
         void mouseUp (const juce::MouseEvent& e) override
         {
             if (track == nullptr) return;
-            const int slot = proc.getSelectedSlot();
             auto& ss = proc.getSlotSettings (slot);
 
             if (dragMode == DragMode::none)
             {
                 const double t = secFor ((float) e.x, track->getLengthSeconds());
-                ss.cue = t;
-                proc.seekReference (t);
+                const bool freeMode = (int) proc.apvts.getRawParameterValue ("mode")->load() == (int) RefABProcessor::Mode::free;
+
+                // Free mode: click = jump (all tracks move together), Alt/Option-click = set this track's cue.
+                // Sync / Restart: click = set the cue (where this track starts when the DAW starts).
+                if (! freeMode || e.mods.isAltDown())
+                    ss.cue = t;
+                proc.seekTo (slot, t);
             }
             else
             {
@@ -804,7 +922,6 @@ namespace ui
         void mouseDoubleClick (const juce::MouseEvent&) override
         {
             if (track == nullptr) return;
-            const int slot = proc.getSelectedSlot();
             auto& ss = proc.getSlotSettings (slot);
             ss.loopOn = false;
             ss.loopStart = 0.0;
@@ -821,8 +938,12 @@ namespace ui
         float xFor (double t, double len) const { return area.getX() + (float) (t / juce::jmax (0.001, len)) * area.getWidth(); }
         double secFor (float x, double len) const { return juce::jlimit (0.0, len, (double) ((x - area.getX()) / area.getWidth()) * len); }
 
+        juce::Colour accent() const { return isA ? col::mix : col::ref; }
+
         RefABProcessor& proc;
         std::shared_ptr<const RefTrack> track;
+        int slot = 0;
+        bool isA = false;
         juce::Rectangle<float> area;
         DragMode dragMode = DragMode::none;
         double dragStartSec = 0.0;
@@ -877,16 +998,16 @@ namespace ui
             const bool refOn = proc.isReferenceAudible();
 
             auto bigRow = r.removeFromTop (62);
-            drawBig (g, bigRow.removeFromLeft (bigRow.getWidth() / 2).reduced (0, 2), "MIX", mS, col::mix, true);
-            drawBig (g, bigRow.reduced (0, 2), "REF", rS, col::ref, refOn);
+            drawBig (g, bigRow.removeFromLeft (bigRow.getWidth() / 2).reduced (0, 2), proc.getASlot() >= 0 ? "A  FILE" : "A  MIX", mS, col::mix, true);
+            drawBig (g, bigRow.reduced (0, 2), "B  REF", rS, col::ref, refOn);
 
             r.removeFromTop (6);
             auto colHead = r.removeFromTop (18);
             g.setFont (font (11.0f, true));
             g.setColour (col::ref);
-            g.drawText ("B  REF", colHead.removeFromRight (70), juce::Justification::centredRight);
+            g.drawText ("B", colHead.removeFromRight (70), juce::Justification::centredRight);
             g.setColour (col::mix);
-            g.drawText ("A  MIX", colHead.removeFromRight (78), juce::Justification::centredRight);
+            g.drawText ("A", colHead.removeFromRight (78), juce::Justification::centredRight);
 
             auto row = [&] (const juce::String& label, const juce::String& unit, const juce::String& a, const juce::String& b, const juce::String& tooltip)
             {
