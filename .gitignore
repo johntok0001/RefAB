@@ -1,4 +1,5 @@
-build/
 *.png
 .DS_Store
 .tools/
+build/
+dist/

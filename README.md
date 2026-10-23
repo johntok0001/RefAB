@@ -6,21 +6,24 @@ RefAB — аналог Metric AB: вешается на мастер, держи
 
 ## Установка
 
-### macOS
-1. Распакуйте `RefAB-macOS.zip`.
-2. Скопируйте `RefAB.vst3` в `~/Library/Audio/Plug-Ins/VST3/`,
-   а `RefAB.component` в `~/Library/Audio/Plug-Ins/Components/` (AU нужен не для REAPER, а для Logic и подобных DAW).
-3. Плагин не подписан сертификатом Apple, поэтому один раз снимите карантин в Терминале:
-   ```
-   xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/RefAB.vst3
-   xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/RefAB.component
-   ```
-4. В REAPER: Options → Preferences → Plug-ins → VST → **Re-scan**.
+### macOS — `RefAB-1.1.0-macOS.pkg`
+1. Дважды кликните по файлу → Продолжить → Установить (Мак спросит пароль).
+   Ставятся VST3 и Audio Unit в `/Library/Audio/Plug-Ins` (для всех пользователей). На странице «Тип установки» можно отключить ненужный формат.
+2. Если macOS пишет, что не может проверить разработчика (установщик не подписан платным сертификатом Apple):
+   - macOS 15 и новее: попробуйте открыть файл, закройте предупреждение, затем **Системные настройки → Конфиденциальность и безопасность** → внизу «Всё равно открыть»;
+   - macOS 14 и старше: правый клик по файлу → **Открыть** → Открыть.
+3. Перезапустите DAW. В REAPER: Preferences → Plug-ins → VST → **Re-scan**.
 
-### Windows
-1. Распакуйте `RefAB-Windows.zip`.
-2. Скопируйте папку `RefAB.vst3` целиком в `C:\Program Files\Common Files\VST3\`.
-3. В REAPER: Options → Preferences → Plug-ins → VST → **Re-scan**.
+### Windows — `RefAB-1.1.0-Windows-Setup.exe`
+1. Запустите файл → Далее → Установить. Плагин ставится в `C:\Program Files\Common Files\VST3`.
+2. Если появится синее окно «Windows защитила ваш компьютер» (установщик не подписан): **Подробнее → Выполнить в любом случае**.
+3. Перезапустите DAW и пересканируйте плагины.
+
+Удалить: macOS — удалить `RefAB.vst3` и `RefAB.component` из `/Library/Audio/Plug-Ins/...`; Windows — «Установка и удаление программ» → RefAB.
+
+### Как собрать установщики
+- **macOS:** `bash make_installer_mac.sh` → готовый файл в папке `dist`.
+- **Windows:** собирается автоматически на GitHub (`.github/workflows/build.yml`). После каждого push оба установщика лежат во вкладке **Actions → последний запуск → Artifacts**. Если сделать тег (например `v1.1.0`), они публикуются на странице **Releases** — эту ссылку удобно отправлять людям.
 
 ## Как пользоваться
 

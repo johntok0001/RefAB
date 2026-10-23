@@ -1,5 +1,7 @@
-name: Build RefAB
+name: Build RefAB installers
 
+# Every push builds both installers (download them from the run's "Artifacts").
+# Pushing a tag like v1.1.0 also publishes them on the Releases page.
 on:
   push:
     branches: [ main, master ]
@@ -10,82 +12,96 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows
-            os: windows-latest
-          - name: macOS
-            os: macos-14
-
+  macos:
+    name: macOS installer (.pkg)
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        run: cmake --build build --config Release --target RefAB_VST3 --parallel
-
-      - name: Build (macOS)
-        if: runner.os == 'macOS'
-        run: cmake --build build --config Release --target RefAB_VST3 RefAB_AU --parallel
-
-      - name: Sign (ad-hoc) and package (macOS)
-        if: runner.os == 'macOS'
+      - name: Build plugin
         run: |
-          ART=build/RefAB_artefacts/Release
-          codesign --force --deep --sign - "$ART/VST3/RefAB.vst3"
-          codesign --force --deep --sign - "$ART/AU/RefAB.component"
-          mkdir -p dist/RefAB-macOS
-          cp -R "$ART/VST3/RefAB.vst3" dist/RefAB-macOS/
-          cp -R "$ART/AU/RefAB.component" dist/RefAB-macOS/
-          cp README.md dist/RefAB-macOS/
-          cd dist && ditto -c -k --keepParent RefAB-macOS RefAB-macOS.zip
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --target RefAB_VST3 RefAB_AU --parallel
 
-      - name: Validate Audio Unit (macOS)
-        if: runner.os == 'macOS'
+      - name: Validate Audio Unit
         run: |
           mkdir -p ~/Library/Audio/Plug-Ins/Components
           cp -R build/RefAB_artefacts/Release/AU/RefAB.component ~/Library/Audio/Plug-Ins/Components/
           killall -9 AudioComponentRegistrar || true
           auval -v aufx Rfa1 Rfab
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist/RefAB-Windows | Out-Null
-          Copy-Item -Recurse build/RefAB_artefacts/Release/VST3/RefAB.vst3 dist/RefAB-Windows/
-          Copy-Item README.md dist/RefAB-Windows/
-          Compress-Archive -Path dist/RefAB-Windows -DestinationPath dist/RefAB-Windows.zip
+          rm -rf ~/Library/Audio/Plug-Ins/Components/RefAB.component
 
       - name: Validate VST3 with pluginval
         continue-on-error: true
-        shell: bash
         run: |
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip
-            7z x -y pluginval.zip > /dev/null
-            ./pluginval.exe --strictness-level 5 --skip-gui-tests --validate-in-process --validate build/RefAB_artefacts/Release/VST3/RefAB.vst3
-          else
-            curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip
-            unzip -q pluginval.zip
-            ./pluginval.app/Contents/MacOS/pluginval --strictness-level 5 --skip-gui-tests --validate-in-process --validate build/RefAB_artefacts/Release/VST3/RefAB.vst3
-          fi
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip
+          unzip -q pluginval.zip
+          ./pluginval.app/Contents/MacOS/pluginval --strictness-level 5 --skip-gui-tests --validate-in-process --validate build/RefAB_artefacts/Release/VST3/RefAB.vst3
+
+      - name: Make installer
+        run: bash make_installer_mac.sh --no-build
+
+      - name: Test installer
+        run: |
+          sudo installer -pkg dist/RefAB-*-macOS.pkg -target /
+          test -f /Library/Audio/Plug-Ins/VST3/RefAB.vst3/Contents/MacOS/RefAB
+          test -d /Library/Audio/Plug-Ins/Components/RefAB.component
+          lipo -archs /Library/Audio/Plug-Ins/VST3/RefAB.vst3/Contents/MacOS/RefAB
 
       - uses: actions/upload-artifact@v4
         with:
-          name: RefAB-${{ matrix.name }}
-          path: dist/RefAB-${{ matrix.name }}.zip
+          name: RefAB-macOS-installer
+          path: dist/*.pkg
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/RefAB-${{ matrix.name }}.zip
+          files: dist/*.pkg
+
+  windows:
+    name: Windows installer (.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build plugin
+        run: |
+          cmake -S . -B build
+          cmake --build build --config Release --target RefAB_VST3 --parallel
+
+      - name: Validate VST3 with pluginval
+        continue-on-error: true
+        shell: bash
+        run: |
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip
+          7z x -y pluginval.zip > /dev/null
+          ./pluginval.exe --strictness-level 5 --skip-gui-tests --validate-in-process --validate build/RefAB_artefacts/Release/VST3/RefAB.vst3
+
+      - name: Install Inno Setup
+        run: choco upgrade innosetup -y --no-progress
+
+      - name: Make installer
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path CMakeLists.txt -Pattern 'project\(RefAB VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" packaging\windows\RefAB.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Test installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist\RefAB-*-Windows-Setup.exe | Select-Object -First 1
+          Start-Process -FilePath $exe.FullName -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          if (-not (Test-Path "$env:CommonProgramFiles\VST3\RefAB.vst3\Contents\x86_64-win\RefAB.vst3")) { throw "plugin not installed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RefAB-Windows-installer
+          path: dist/*.exe
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe

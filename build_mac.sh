@@ -31,6 +31,11 @@ echo "==> Настраиваю проект (первый раз скачива�
 echo "==> Собираю..."
 "$CMAKE" --build build --config Release --target RefAB_VST3 RefAB_AU -j "$(sysctl -n hw.ncpu)"
 
+# make_installer_mac.sh only needs the build
+if [ "$1" == "--build-only" ]; then
+    exit 0
+fi
+
 ART=build/RefAB_artefacts/Release
 VST3_DIR="$HOME/Library/Audio/Plug-Ins/VST3"
 AU_DIR="$HOME/Library/Audio/Plug-Ins/Components"

@@ -5,7 +5,7 @@ if(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Universal binary")
 endif()
 
-project(RefAB VERSION 1.0.0 LANGUAGES C CXX)
+project(RefAB VERSION 1.1.0 LANGUAGES C CXX)
 
 # Windows: link the C++ runtime statically so no VC++ redistributable is needed
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
